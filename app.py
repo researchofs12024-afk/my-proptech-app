@@ -2,125 +2,142 @@ import streamlit as st
 import pandas as pd
 import requests
 import urllib3
-import streamlit.components.v1 as components
+import folium
+from streamlit_folium import st_folium
 
 # 보안 경고 무시
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- [설정] 모든 키 입력 ---
-MAP_JS_KEY = "ede7b455451821c17720156a3e8b5011"
 ADDR_REST_KEY = "c5af33c0d1d6a654362d3fea152cc076" 
 LEDGER_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 VWORLD_KEY = "D2A7A3D2-EBE4-339F-A5A7-3C32E6751F98"
 
-st.set_page_config(page_title="카카오 부동산 플랫폼", layout="wide")
+st.set_page_config(page_title="부동산 통합 플랫폼", layout="wide")
 
-# --- 1. 데이터 처리 함수 (기존 성공 로직) ---
-def get_building_info(lat, lng):
+# --- 1. 데이터 처리 함수 (검증된 로직) ---
+def get_info(lat, lng):
     headers = {"Authorization": f"KakaoAK {ADDR_REST_KEY}"}
     try:
-        # 카카오 법정동코드 조회
+        # 법정동코드 조회 (카카오 REST API)
         reg_res = requests.get(f"https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x={lng}&y={lat}", headers=headers, timeout=5).json()
         b_code = next((doc['code'] for doc in reg_res.get('documents', []) if doc.get('region_type') == 'B'), None)
-        # 카카오 지번 주소 조회
+        
+        # 지번 주소 조회 (카카오 REST API)
         addr_res = requests.get(f"https://dapi.kakao.com/v2/local/geo/coord2address.json?x={lng}&y={lat}", headers=headers, timeout=5).json()
         
         if not b_code or not addr_res.get('documents'):
-            return "주소 정보를 찾을 수 없습니다.", None, None
-
-        addr_obj = addr_res['documents'][0]['address']
-        addr_name = addr_obj['address_name']
-        bun = addr_obj['main_address_no']
-        ji = addr_obj['sub_address_no'] or "0"
-        pnu = b_code + '1' + bun.zfill(4) + ji.zfill(4)
+            return None
+        
+        addr_info = addr_res['documents'][0]['address']
+        pnu = b_code + '1' + addr_info['main_address_no'].zfill(4) + (addr_info['sub_address_no'] or '0').zfill(4)
         
         # 건축물대장 Hub API 조회
         url = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
-        params = {'serviceKey': LEDGER_KEY, 'sigunguCd': b_code[:5], 'bjdongCd': b_code[5:10], 'platGbCd': '0', 'bun': bun.zfill(4), 'ji': ji.zfill(4), 'pageNo': '1', 'numOfRows': '30', '_type': 'json'}
-        res = requests.get(url, params=params, verify=False, timeout=10).json()
+        params = {
+            'serviceKey': LEDGER_KEY, 'sigunguCd': b_code[:5], 'bjdongCd': b_code[5:10],
+            'platGbCd': '0', 'bun': addr_info['main_address_no'].zfill(4), 
+            'ji': (addr_info['sub_address_no'] or '0').zfill(4), 
+            'pageNo': '1', 'numOfRows': '30', '_type': 'json'
+        }
+        res = requests.get(url, params=params, verify=False, timeout=5).json()
         items = res.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-        return addr_name, pnu, ([items] if isinstance(items, dict) else items)
+        
+        return {
+            "addr": addr_info['address_name'],
+            "pnu": pnu,
+            "items": [items] if isinstance(items, dict) else items
+        }
     except:
-        return "데이터 조회 중 오류가 발생했습니다.", None, None
+        return None
 
-# --- 2. 페이지 상태 관리 ---
-if "clicked_pos" not in st.session_state:
-    st.session_state.clicked_pos = None
+# --- 2. 세션 상태 관리 (번쩍임 방지 핵심) ---
+if "map_center" not in st.session_state:
+    st.session_state.map_center = [37.5668, 126.9786]
+if "selected_data" not in st.session_state:
+    st.session_state.selected_data = None
+if "polygon_geom" not in st.session_state:
+    st.session_state.polygon_geom = None
 
-st.title("🗺️ 카카오맵 기반 부동산 통합 플랫폼")
+st.title("🏗️ 맞춤형 부동산 정보 통합 플랫폼")
 
+# --- 3. 화면 레이아웃 ---
 col1, col2 = st.columns([2, 1])
 
-# --- 3. 좌측 지도창 (디자인 중심) ---
 with col1:
-    # 현재 클릭된 좌표가 있으면 지도의 중심으로 설정
-    c_lat = st.session_state.clicked_pos["lat"] if st.session_state.clicked_pos else 37.5668
-    c_lng = st.session_state.clicked_pos["lng"] if st.session_state.clicked_pos else 126.9786
+    # 지도 객체 생성
+    m = folium.Map(
+        location=st.session_state.map_center,
+        zoom_start=18,
+        tiles=None
+    )
+    
+    # 배경: 브이월드 기본지도 (Base)
+    folium.TileLayer(
+        tiles=f"https://api.vworld.kr/req/wmts/1.0.0/{VWORLD_KEY}/Base/{{z}}/{{y}}/{{x}}.png",
+        attr="Vworld Base", name="배경지도", overlay=False, control=False
+    ).add_to(m)
 
-    map_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
-        <style>
-            html, body, #map {{ width:100%; height:650px; margin:0; padding:0; border-radius:15px; }}
-            #ui-info {{ position: absolute; top: 15px; left: 15px; z-index: 10; padding:12px; background:white; border:2px solid #ffcd00; border-radius:10px; font-family: 'Malgun Gothic', sans-serif; font-size:13px; font-weight:bold; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }}
-        </style>
-    </head>
-    <body>
-        <div id="ui-info">📍 카카오 지도를 클릭해 주세요.</div>
-        <div id="map"></div>
+    # 레이어: 지적도 (투명도 조절로 도로가 보이게 함)
+    folium.TileLayer(
+        tiles=f"https://api.vworld.kr/req/wms?SERVICE=WMS&REQUEST=GetMap&LAYERS=lp_pa_cbnd_bu&STYLES=lp_pa_cbnd_bu&FORMAT=image/png&TRANSPARENT=TRUE&KEY={VWORLD_KEY}&DOMAIN=http://localhost&SRS=EPSG:3857&WIDTH=256&HEIGHT=256",
+        attr="Vworld Cadastral", name="지적도", overlay=True, control=True, opacity=0.5
+    ).add_to(m)
 
-        <script type="text/javascript" src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={MAP_JS_KEY}&libraries=services&autoload=false"></script>
-        <script>
-            kakao.maps.load(function() {{
-                var container = document.getElementById('map');
-                var options = {{ center: new kakao.maps.LatLng({c_lat}, {c_lng}), level: 2 }};
-                var map = new kakao.maps.Map(container, options);
+    # 하이라이트 표시 (클릭된 필지 모양)
+    if st.session_state.polygon_geom:
+        folium.GeoJson(
+            st.session_state.polygon_geom,
+            style_function=lambda x: {'fillColor': '#004cff', 'color': '#004cff', 'weight': 3, 'fillOpacity': 0.3}
+        ).add_to(m)
+
+    # 스트림릿에 지도 표시 (key="main_map"으로 고정하여 상태 유지)
+    map_output = st_folium(m, width="100%", height=650, key="main_map")
+
+    # [클릭 감지 로직]
+    if map_output.get("last_clicked"):
+        last_clicked = map_output["last_clicked"]
+        # 이전에 클릭한 위치와 다를 때만 실행 (무한루프 방지)
+        if st.session_state.get('prev_click') != last_clicked:
+            st.session_state.prev_click = last_clicked
+            
+            # 1. 데이터 분석
+            res_data = get_info(last_clicked["lat"], last_clicked["lng"])
+            if res_data:
+                st.session_state.selected_data = res_data
+                st.session_state.map_center = [last_clicked["lat"], last_clicked["lng"]]
                 
-                // 카카오맵 특유의 컨트롤들 추가
-                map.addControl(new kakao.maps.MapTypeControl(), kakao.maps.ControlPosition.TOPRIGHT);
-                map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+                # 2. 브이월드 경계선(하이라이트) 가져오기
+                v_url = f"https://api.vworld.kr/req/data?service=data&request=GetFeature&data=LP_PA_CBND_BU_GEOM&key={VWORLD_KEY}&domain=http://localhost&attrFilter=pnu:={res_data['pnu']}&crs=EPSG:4326"
+                try:
+                    v_res = requests.get(v_url, timeout=3).json()
+                    if v_res.get('response', {}).get('status') == 'OK':
+                        st.session_state.polygon_geom = v_res['response']['result']['featureCollection']
+                    else:
+                        st.session_state.polygon_geom = None
+                except:
+                    st.session_state.polygon_geom = None
+                
+                # 즉시 새로고침하여 데이터 반영
+                st.rerun()
 
-                // 클릭 이벤트
-                kakao.maps.event.addListener(map, 'click', function(e) {{
-                    var latlng = e.latLng;
-                    // [핵심] 쿼리 파라미터를 통해 부모 창을 새로고침 (가장 확실한 통신법)
-                    var url = window.parent.location.origin + window.parent.location.pathname + "?lat=" + latlng.getLat() + "&lng=" + latlng.getLng();
-                    window.parent.location.href = url;
-                }});
-            }});
-        </script>
-    </body>
-    </html>
-    """
-    components.html(map_html, height=670)
-
-# --- 4. 우측 정보창 ---
 with col2:
     st.subheader("📋 건축물 상세 정보")
-    
-    # URL에서 좌표를 가져옴
-    params = st.query_params
-    if "lat" in params and "lng" in params:
-        lat = float(params["lat"])
-        lng = float(params["lng"])
-        st.session_state.clicked_pos = {"lat": lat, "lng": lng}
+    if st.session_state.selected_data:
+        data = st.session_state.selected_data
+        st.success(f"📍 {data['addr']}")
         
-        with st.spinner("카카오 데이터를 분석 중..."):
-            addr, pnu, items = get_building_data(lat, lng)
-            
-        if pnu:
-            st.success(f"📍 {addr}")
-            if items:
-                for item in items:
-                    with st.expander(f"🏢 {item.get('bldNm', '건물명 없음')}", expanded=True):
-                        st.write(f"**용도:** {item.get('mainPurpsCdNm')}")
-                        st.write(f"**층수:** {item.get('grndFlrCnt')}F / B{item.get('ugrndFlrCnt')}")
-                        st.write(f"**연면적:** {item.get('totArea')} ㎡")
-            else:
-                st.warning("등록된 건축물이 없습니다.")
+        if data['items']:
+            for item in data['items']:
+                with st.expander(f"🏢 {item.get('bldNm', '건물명 없음')}", expanded=True):
+                    c1, c2 = st.columns(2)
+                    c1.metric("지상층수", f"{item.get('grndFlrCnt')}F")
+                    c2.metric("지하층수", f"B{item.get('ugrndFlrCnt')}")
+                    st.write(f"**주용도:** {item.get('mainPurpsCdNm')}")
+                    st.write(f"**구조:** {item.get('strctCdNm')}")
+                    st.write(f"**연면적:** {item.get('totArea')} ㎡")
+                    st.write(f"**사용승인:** {item.get('useAprvDe', '-')}")
         else:
-            st.error(addr)
+            st.warning("등록된 건물이 없습니다.")
     else:
         st.info("지도를 클릭하면 정보가 나타납니다.")
