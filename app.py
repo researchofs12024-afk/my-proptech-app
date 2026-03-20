@@ -1,143 +1,151 @@
 import streamlit as st
-import pandas as pd
-import requests
-import urllib3
-import folium
-from streamlit_folium import st_folium
-
-# 보안 경고 무시
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import streamlit.components.v1 as components
 
 # --- [설정] 모든 키 입력 ---
-ADDR_REST_KEY = "c5af33c0d1d6a654362d3fea152cc076" 
-LEDGER_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
+MAP_JS_KEY = "ede7b455451821c17720156a3e8b5011"
 VWORLD_KEY = "D2A7A3D2-EBE4-339F-A5A7-3C32E6751F98"
+GOV_API_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 
 st.set_page_config(page_title="부동산 통합 플랫폼", layout="wide")
 
-# --- 1. 데이터 처리 함수 (검증된 로직) ---
-def get_info(lat, lng):
-    headers = {"Authorization": f"KakaoAK {ADDR_REST_KEY}"}
-    try:
-        # 법정동코드 조회 (카카오 REST API)
-        reg_res = requests.get(f"https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x={lng}&y={lat}", headers=headers, timeout=5).json()
-        b_code = next((doc['code'] for doc in reg_res.get('documents', []) if doc.get('region_type') == 'B'), None)
+# Streamlit의 기본 여백을 제거하여 꽉 찬 화면 만들기
+st.markdown("""
+    <style>
+    .main .block-container { padding: 0; max-width: 100%; }
+    iframe { border: none; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- [올인원 HTML 컴포넌트] ---
+all_in_one_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <style>
+        body, html {{ margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; font-family: 'Malgun Gothic', sans-serif; }}
+        #map {{ width: 100%; height: 100vh; position: relative; z-index: 1; }}
         
-        # 지번 주소 조회 (카카오 REST API)
-        addr_res = requests.get(f"https://dapi.kakao.com/v2/local/geo/coord2address.json?x={lng}&y={lat}", headers=headers, timeout=5).json()
+        /* 왼쪽 정보 팝업 스타일 */
+        #side-panel {{
+            position: absolute; top: 0; left: -400px; width: 350px; height: 100%;
+            background: white; z-index: 100; transition: 0.3s;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.2); padding: 20px; overflow-y: auto;
+        }}
+        #side-panel.open {{ left: 0; }}
+        #close-btn {{ position: absolute; top: 15px; right: 15px; cursor: pointer; font-size: 20px; font-weight: bold; color: #888; }}
         
-        if not b_code or not addr_res.get('documents'):
-            return None
-        
-        addr_info = addr_res['documents'][0]['address']
-        pnu = b_code + '1' + addr_info['main_address_no'].zfill(4) + (addr_info['sub_address_no'] or '0').zfill(4)
-        
-        # 건축물대장 Hub API 조회
-        url = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
-        params = {
-            'serviceKey': LEDGER_KEY, 'sigunguCd': b_code[:5], 'bjdongCd': b_code[5:10],
-            'platGbCd': '0', 'bun': addr_info['main_address_no'].zfill(4), 
-            'ji': (addr_info['sub_address_no'] or '0').zfill(4), 
-            'pageNo': '1', 'numOfRows': '30', '_type': 'json'
-        }
-        res = requests.get(url, params=params, verify=False, timeout=5).json()
-        items = res.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-        
-        return {
-            "addr": addr_info['address_name'],
-            "pnu": pnu,
-            "items": [items] if isinstance(items, dict) else items
-        }
-    except:
-        return None
+        .loading {{ color: #007bff; font-weight: bold; }}
+        .building-card {{ border: 1px solid #eee; padding: 15px; border-radius: 8px; margin-bottom: 15px; background: #f9f9f9; }}
+        .addr-title {{ font-size: 18px; font-weight: bold; margin-bottom: 10px; color: #333; }}
+        .info-row {{ font-size: 14px; margin: 5px 0; color: #555; }}
+        .badge {{ display: inline-block; padding: 3px 8px; background: #007bff; color: white; border-radius: 4px; font-size: 12px; }}
+    </style>
+</head>
+<body>
 
-# --- 2. 세션 상태 관리 (번쩍임 방지 핵심) ---
-if "map_center" not in st.session_state:
-    st.session_state.map_center = [37.5668, 126.9786]
-if "selected_data" not in st.session_state:
-    st.session_state.selected_data = None
-if "polygon_geom" not in st.session_state:
-    st.session_state.polygon_geom = None
+    <!-- 왼쪽 정보 창 -->
+    <div id="side-panel">
+        <div id="close-btn" onclick="closePanel()">×</div>
+        <div id="content">
+            <p>지도의 건물을 클릭하면 상세 정보가 나타납니다.</p>
+        </div>
+    </div>
 
-st.title("🏗️ 맞춤형 부동산 정보 통합 플랫폼")
+    <!-- 지도 영역 -->
+    <div id="map"></div>
 
-# --- 3. 화면 레이아웃 ---
-col1, col2 = st.columns([2, 1])
+    <script type="text/javascript" src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={MAP_JS_KEY}&libraries=services&autoload=false"></script>
+    <script>
+        var map, currentPoly;
 
-with col1:
-    # 지도 객체 생성
-    m = folium.Map(
-        location=st.session_state.map_center,
-        zoom_start=18,
-        tiles=None
-    )
-    
-    # 배경: 브이월드 기본지도 (Base)
-    folium.TileLayer(
-        tiles=f"https://api.vworld.kr/req/wmts/1.0.0/{VWORLD_KEY}/Base/{{z}}/{{y}}/{{x}}.png",
-        attr="Vworld Base", name="배경지도", overlay=False, control=False
-    ).add_to(m)
+        kakao.maps.load(function() {{
+            var container = document.getElementById('map');
+            map = new kakao.maps.Map(container, {{ center: new kakao.maps.LatLng(37.5668, 126.9786), level: 2 }});
+            map.addOverlayMapTypeId(kakao.maps.MapTypeId.USE_DISTRICT); // 지적도 활성화
 
-    # 레이어: 지적도 (투명도 조절로 도로가 보이게 함)
-    folium.TileLayer(
-        tiles=f"https://api.vworld.kr/req/wms?SERVICE=WMS&REQUEST=GetMap&LAYERS=lp_pa_cbnd_bu&STYLES=lp_pa_cbnd_bu&FORMAT=image/png&TRANSPARENT=TRUE&KEY={VWORLD_KEY}&DOMAIN=http://localhost&SRS=EPSG:3857&WIDTH=256&HEIGHT=256",
-        attr="Vworld Cadastral", name="지적도", overlay=True, control=True, opacity=0.5
-    ).add_to(m)
+            var geocoder = new kakao.maps.services.Geocoder();
 
-    # 하이라이트 표시 (클릭된 필지 모양)
-    if st.session_state.polygon_geom:
-        folium.GeoJson(
-            st.session_state.polygon_geom,
-            style_function=lambda x: {'fillColor': '#004cff', 'color': '#004cff', 'weight': 3, 'fillOpacity': 0.3}
-        ).add_to(m)
-
-    # 스트림릿에 지도 표시 (key="main_map"으로 고정하여 상태 유지)
-    map_output = st_folium(m, width="100%", height=650, key="main_map")
-
-    # [클릭 감지 로직]
-    if map_output.get("last_clicked"):
-        last_clicked = map_output["last_clicked"]
-        # 이전에 클릭한 위치와 다를 때만 실행 (무한루프 방지)
-        if st.session_state.get('prev_click') != last_clicked:
-            st.session_state.prev_click = last_clicked
-            
-            # 1. 데이터 분석
-            res_data = get_info(last_clicked["lat"], last_clicked["lng"])
-            if res_data:
-                st.session_state.selected_data = res_data
-                st.session_state.map_center = [last_clicked["lat"], last_clicked["lng"]]
+            // 지도 클릭 이벤트
+            kakao.maps.event.addListener(map, 'click', function(e) {{
+                var lat = e.latLng.getLat();
+                var lng = e.latLng.getLng();
                 
-                # 2. 브이월드 경계선(하이라이트) 가져오기
-                v_url = f"https://api.vworld.kr/req/data?service=data&request=GetFeature&data=LP_PA_CBND_BU_GEOM&key={VWORLD_KEY}&domain=http://localhost&attrFilter=pnu:={res_data['pnu']}&crs=EPSG:4326"
-                try:
-                    v_res = requests.get(v_url, timeout=3).json()
-                    if v_res.get('response', {}).get('status') == 'OK':
-                        st.session_state.polygon_geom = v_res['response']['result']['featureCollection']
-                    else:
-                        st.session_state.polygon_geom = None
-                except:
-                    st.session_state.polygon_geom = None
-                
-                # 즉시 새로고침하여 데이터 반영
-                st.rerun()
+                openPanel();
+                document.getElementById('content').innerHTML = '<p class="loading">⏳ 정보를 분석 중입니다...</p>';
 
-with col2:
-    st.subheader("📋 건축물 상세 정보")
-    if st.session_state.selected_data:
-        data = st.session_state.selected_data
-        st.success(f"📍 {data['addr']}")
-        
-        if data['items']:
-            for item in data['items']:
-                with st.expander(f"🏢 {item.get('bldNm', '건물명 없음')}", expanded=True):
-                    c1, c2 = st.columns(2)
-                    c1.metric("지상층수", f"{item.get('grndFlrCnt')}F")
-                    c2.metric("지하층수", f"B{item.get('ugrndFlrCnt')}")
-                    st.write(f"**주용도:** {item.get('mainPurpsCdNm')}")
-                    st.write(f"**구조:** {item.get('strctCdNm')}")
-                    st.write(f"**연면적:** {item.get('totArea')} ㎡")
-                    st.write(f"**사용승인:** {item.get('useAprvDe', '-')}")
-        else:
-            st.warning("등록된 건물이 없습니다.")
-    else:
-        st.info("지도를 클릭하면 정보가 나타납니다.")
+                // 1. 주소 및 PNU 추출
+                geocoder.coord2Address(lng, lat, function(res, stat) {{
+                    if (stat === kakao.maps.services.Status.OK && res[0].address) {{
+                        var a = res[0].address;
+                        var pnu = a.b_code + '1' + a.main_address_no.padStart(4, '0') + a.sub_address_no.padStart(4, '0');
+                        fetchData(a.address_name, pnu, a.b_code, a.main_address_no, a.sub_address_no);
+                        drawHighlight(pnu);
+                    }} else {{
+                        document.getElementById('content').innerHTML = '<p>❌ 지번 정보가 없는 지점입니다.</p>';
+                    }}
+                }});
+            }});
+        }});
+
+        function openPanel() {{ document.getElementById('side-panel').classList.add('open'); }}
+        function closePanel() {{ document.getElementById('side-panel').classList.remove('open'); }}
+
+        // 2. 하이라이트 (Vworld)
+        function drawHighlight(pnu) {{
+            if (currentPoly) currentPoly.setMap(null);
+            var vUrl = "https://api.vworld.kr/req/data?service=data&request=GetFeature&data=LP_PA_CBND_BU_GEOM&key={VWORLD_KEY}&domain=" + window.location.origin + "&attrFilter=pnu:=" + pnu + "&crs=EPSG:4326&callback=vCallback";
+            var script = document.createElement('script');
+            script.src = vUrl;
+            document.body.appendChild(script);
+        }}
+
+        window.vCallback = function(data) {{
+            if(data.response && data.response.status === 'OK') {{
+                var geom = data.response.result.featureCollection.features[0].geometry.coordinates;
+                while(Array.isArray(geom[0][0])) {{ geom = geom[0]; }}
+                var path = geom.map(c => new kakao.maps.LatLng(c[1], c[0]));
+                currentPoly = new kakao.maps.Polygon({{ path: path, strokeWeight: 3, strokeColor: '#004cff', fillOpacity: 0.2, map: map }});
+            }}
+        }};
+
+        // 3. 건축물대장 데이터 가져오기 (정부 API 직접 호출)
+        function fetchData(addr, pnu, b_code, bun, ji) {{
+            var sigungu = b_code.substring(0, 5);
+            var bjdong = b_code.substring(5, 10);
+            var url = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo?serviceKey={GOV_API_KEY}&sigunguCd=" + sigungu + "&bjdongCd=" + bjdong + "&platGbCd=0&bun=" + bun.padStart(4, '0') + "&ji=" + ji.padStart(4, '0') + "&_type=json&numOfRows=10";
+
+            fetch(url)
+                .then(res => res.json())
+                .then(data => {{
+                    var items = data.response.body.items.item;
+                    if(!items) {{
+                        document.getElementById('content').innerHTML = '<div class="addr-title">' + addr + '</div><p>등록된 건축물 정보가 없습니다.</p>';
+                        return;
+                    }}
+                    if(!Array.isArray(items)) items = [items];
+
+                    var html = '<div class="addr-title">' + addr + '</div>';
+                    items.forEach(item => {{
+                        html += '<div class="building-card">';
+                        html += '<div class="badge">' + (item.bldNm || '건물명 없음') + '</div>';
+                        html += '<div class="info-row"><b>주용도:</b> ' + item.mainPurpsCdNm + '</div>';
+                        html += '<div class="info-row"><b>층수:</b> ' + item.grndFlrCnt + 'F / B' + item.ugrndFlrCnt + '</div>';
+                        html += '<div class="info-row"><b>연면적:</b> ' + item.totArea + ' ㎡</div>';
+                        html += '<div class="info-row"><b>승인일:</b> ' + item.useAprvDe + '</div>';
+                        html += '</div>';
+                    }});
+                    document.getElementById('content').innerHTML = html;
+                }})
+                .catch(err => {{
+                    document.getElementById('content').innerHTML = '<p>❌ 데이터 로드 중 오류가 발생했습니다.</p>';
+                }});
+        }}
+    </script>
+</body>
+</html>
+"""
+
+# 화면에 표시 (높이를 100vh에 가깝게 설정)
+components.html(all_in_one_html, height=850)
