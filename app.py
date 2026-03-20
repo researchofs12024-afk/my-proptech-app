@@ -40,6 +40,13 @@ col1, col2 = st.columns([2, 1])
 # 현재 주소창의 파라미터를 읽어옴
 query_params = st.query_params
 
+# 지도의 중심점 설정 (클릭한 곳이 있으면 그곳으로, 없으면 서울시청)
+map_lat = 37.5668
+map_lng = 126.9786
+if "lat" in query_params:
+    map_lat = float(query_params["lat"])
+    map_lng = float(query_params["lng"])
+
 with col1:
     # 지도 HTML/JS
     map_html = f"""
@@ -48,13 +55,14 @@ with col1:
     <head>
         <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
         <style>
-            #map {{ width:100%; height:650px; border-radius:10px; border:1px solid #ccc; }}
-            #v-status {{ padding:5px; font-size:12px; color:gray; font-family: sans-serif; }}
+            html, body {{ margin:0; padding:0; height:100%; width:100%; }}
+            #map {{ width:100%; height:650px; border-radius:10px; border:1px solid #ccc; cursor: pointer; }}
+            #v-status {{ position: absolute; top: 10px; left: 10px; z-index: 10; padding:8px; background:white; border:1px solid #ccc; font-size:12px; border-radius:5px; }}
         </style>
     </head>
     <body>
+        <div id="v-status">지도를 클릭하면 정보가 나타납니다. (필지 안쪽 클릭)</div>
         <div id="map"></div>
-        <div id="v-status">지도를 클릭하면 정보가 나타납/니다. (필지 안쪽을 클릭하세요)</div>
 
         <script type="text/javascript" src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={MAP_JS_KEY}&libraries=services&autoload=false"></script>
         <script>
@@ -63,7 +71,7 @@ with col1:
             kakao.maps.load(function() {{
                 var container = document.getElementById('map');
                 var options = {{ 
-                    center: new kakao.maps.LatLng(37.5668, 126.9786), 
+                    center: new kakao.maps.LatLng({map_lat}, {map_lng}), 
                     level: 2 
                 }};
                 map = new kakao.maps.Map(container, options);
@@ -71,18 +79,37 @@ with col1:
 
                 var geocoder = new kakao.maps.services.Geocoder();
 
+                // 클릭 이벤트
                 kakao.maps.event.addListener(map, 'click', function(e) {{
-                    geocoder.coord2Address(e.latLng.getLng(), e.latLng.getLat(), function(res, stat) {{
+                    var lat = e.latLng.getLat();
+                    var lng = e.latLng.getLng();
+                    
+                    document.getElementById('v-status').innerText = "⏳ 주소 분석 중...";
+
+                    geocoder.coord2Address(lng, lat, function(res, stat) {{
                         if (stat === kakao.maps.services.Status.OK && res[0].address) {{
                             var a = res[0].address;
                             var pnu = a.b_code + '1' + a.main_address_no.padStart(4, '0') + a.sub_address_no.padStart(4, '0');
                             
-                            var newUrl = window.location.origin + window.location.pathname + '?b_code=' + a.b_code + '&bun=' + a.main_address_no + '&ji=' + (a.sub_address_no || '0') + '&addr=' + encodeURIComponent(a.address_name) + '&pnu=' + pnu;
-                            parent.window.location.href = newUrl;
+                            // 부모 주소창의 URL을 강제로 변경 (window.top 사용)
+                            var newUrl = window.location.origin + window.location.pathname + 
+                                         '?b_code=' + a.b_code + 
+                                         '&bun=' + a.main_address_no + 
+                                         '&ji=' + (a.sub_address_no || '0') + 
+                                         '&addr=' + encodeURIComponent(a.address_name) + 
+                                         '&pnu=' + pnu +
+                                         '&lat=' + lat +
+                                         '&lng=' + lng;
+                            
+                            // Streamlit Cloud의 Iframe 보안을 뚫기 위한 최상단 이동 명령어
+                            window.top.location.href = newUrl;
+                        }} else {{
+                            document.getElementById('v-status').innerText = "❌ 지번 주소가 없습니다.";
                         }}
                     }});
                 }});
 
+                // 하이라이트 그리기
                 var params = new URLSearchParams(window.location.search);
                 var pnu = params.get('pnu');
                 if(pnu) {{
@@ -98,23 +125,24 @@ with col1:
                     var geom = data.response.result.featureCollection.features[0].geometry.coordinates;
                     while(Array.isArray(geom[0][0])) {{ geom = geom[0]; }}
                     var path = geom.map(c => new kakao.maps.LatLng(c[1], c[0]));
-                    new kakao.maps.Polygon({{ path: path, strokeWeight: 3, strokeColor: '#004cff', fillOpacity: 0.2, map: map }});
-                    map.setCenter(path[0]);
+                    currentPoly = new kakao.maps.Polygon({{ path: path, strokeWeight: 3, strokeColor: '#004cff', fillOpacity: 0.2, map: map }});
+                    document.getElementById('v-status').innerText = "✅ 필지 확인 완료";
                 }}
             }};
         </script>
     </body>
     </html>
     """
-    components.html(map_html, height=700)
+    components.html(map_html, height=670)
 
 with col2:
     st.subheader("📋 건축물 상세 정보")
+    # Streamlit 최신 버전 쿼리 파라미터 읽기 방식
     if "b_code" in query_params:
-        addr = query_params.get("addr", "정보 없음")
-        b_code = query_params.get("b_code")
-        bun = query_params.get("bun")
-        ji = query_params.get("ji")
+        addr = query_params["addr"]
+        b_code = query_params["b_code"]
+        bun = query_params["bun"]
+        ji = query_params["ji"]
         
         st.success(f"📍 {addr}")
         
@@ -133,4 +161,4 @@ with col2:
         else:
             st.warning("건축물대장 정보가 없습니다.")
     else:
-        st.info("지도에서 대지를 클릭해 주세요.")
+        st.info("지도에서 대지(건물)를 클릭해 주세요.")
