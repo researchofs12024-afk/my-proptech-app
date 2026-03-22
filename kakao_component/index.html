@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+#map { width: 100%; height: 100vh; }
+
+.kbtn {
+  background: #fff;
+  border: 2px solid #3396ff;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a3a6b;
+  font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+  box-shadow: 0 3px 10px rgba(0,0,0,.15);
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  transition: background .1s;
+}
+.kbtn:hover { background: #e8f0ff; }
+.kbtn::after {
+  content: '';
+  position: absolute;
+  bottom: -9px; left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #3396ff;
+}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script>
+// ── Streamlit 컴포넌트 공식 통신 채널 ─────────────────
+// Streamlit이 이 iframe을 로드하면 아래 이벤트를 기다림
+// setComponentValue(value) 호출 → Python의 declare_component() 반환값으로 전달
+// → st.rerun() 트리거 없이도 Python이 값 수신
+
+var Streamlit = {
+  setComponentValue: function(value) {
+    window.parent.postMessage({
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  },
+  setFrameHeight: function(height) {
+    window.parent.postMessage({
+      type: "streamlit:setFrameHeight",
+      height: height
+    }, "*");
+  }
+};
+
+// Streamlit에 컴포넌트 준비 완료 알림
+window.parent.postMessage({ type: "streamlit:componentReady", apiVersion: 1 }, "*");
+
+// Streamlit이 Python에서 보내는 데이터 수신 (초기 pnu, lat, lng 등)
+var initData = null;
+window.addEventListener("message", function(e) {
+  if (e.data.type === "streamlit:render") {
+    initData = e.data.args;
+    initMap(initData);
+  }
+});
+</script>
+
+<script>
+// ── 카카오맵 SDK ─────────────────────────────────────
+// APP_KEY는 Python이 render 이벤트로 전달
+var map, ov, MAP_KEY, VWORLD_KEY;
+
+function initMap(args) {
+  MAP_KEY     = args.map_key;
+  VWORLD_KEY  = args.vworld_key;
+  var lat     = args.lat     || 37.5668;
+  var lng     = args.lng     || 126.9786;
+  var pnu     = args.pnu     || "";
+
+  // SDK 동적 로드
+  var script = document.createElement("script");
+  script.src = "https://dapi.kakao.com/v2/maps/sdk.js?appkey=" + MAP_KEY
+             + "&libraries=services&autoload=false";
+  script.onload = function() {
+    kakao.maps.load(function() {
+      map = new kakao.maps.Map(document.getElementById("map"), {
+        center: new kakao.maps.LatLng(lat, lng),
+        level: 3
+      });
+
+      if (pnu) drawParcel(pnu);
+
+      kakao.maps.event.addListener(map, "click", function(e) {
+        var clat = e.latLng.getLat();
+        var clng = e.latLng.getLng();
+        if (ov) ov.setMap(null);
+
+        // 클릭할 때마다 새 div 생성 (onclick에 좌표 직접 바인딩)
+        var div = document.createElement("div");
+        div.className = "kbtn";
+        div.textContent = "📋 건축물대장 조회";
+        div.onclick = function() {
+          // Streamlit 공식 채널로 좌표 전달
+          Streamlit.setComponentValue({ lat: clat, lng: clng });
+        };
+
+        ov = new kakao.maps.CustomOverlay({
+          map: map,
+          position: e.latLng,
+          content: div,
+          yAnchor: 1.0
+        });
+      });
+
+      // iframe 높이 Streamlit에 알림
+      Streamlit.setFrameHeight(document.body.scrollHeight);
+    });
+  };
+  document.head.appendChild(script);
+}
+
+// ── Vworld 지적경계 ──────────────────────────────────
+function drawParcel(pnu) {
+  var s = document.createElement("script");
+  s.src = "https://api.vworld.kr/req/data?service=data&request=GetFeature"
+    + "&data=LP_PA_CBND_BU_GEOM&key=" + VWORLD_KEY
+    + "&attrFilter=pnu:=" + pnu + "&crs=EPSG:4326&callback=vCb";
+  document.body.appendChild(s);
+}
+
+window.vCb = function(d) {
+  if (!d.response || d.response.status !== "OK") return;
+  var f = d.response.result.featureCollection.features;
+  if (!f || !f.length) return;
+  var g = f[0].geometry.coordinates;
+  while (Array.isArray(g[0][0])) g = g[0];
+  var path = g.map(function(c) { return new kakao.maps.LatLng(c[1], c[0]); });
+  new kakao.maps.Polygon({
+    map: map, path: path,
+    strokeWeight: 3, strokeColor: "#3396ff", strokeOpacity: 1,
+    fillColor: "#3396ff", fillOpacity: 0.15
+  });
+};
+</script>
+</body>
+</html>
