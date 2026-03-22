@@ -1,30 +1,23 @@
 """
 부동산 통합 플랫폼 - 카카오맵
-===============================
-[구조]
-  app.py
-  kakao_component/
-    index.html   ← 카카오맵 (고정 경로 → 번쩍거림 없음)
+================================
+[확정 구조 - 파일 1개]
 
-[JS→Python 통신]
-  Streamlit.setComponentValue({lat, lng})
-  → declare_component 공식 채널
-  → window.top / location 우회 없음
+JS→Python 통신 방법:
+  - JS가 카카오 REST(CORS허용)로 PNU를 직접 계산
+  - <a href="?pnu=...&addr=...&lat=...&lng=..." target="_top"> 생성 후 JS로 클릭
+  - Streamlit sandbox: allow-top-navigation-by-user-activation
+    → 사용자 클릭 이벤트에서만 target="_top" 허용 → 정상 작동
+  - Python이 query_params 감지 → 건축물대장 API 호출 → 결과 표시
 
-[흐름]
-  1. 지도 클릭 → JS: setComponentValue({lat, lng})
-  2. Python: coord 수신 → 카카오REST + 건축물대장 API 호출
-  3. session_state 갱신 → st.rerun()
-  4. 우측 패널에 결과 표시
-  5. Python이 컴포넌트에 pnu, lat, lng 재전달 → 지도 유지
+declare_component, tempfile 완전 제거
 """
 
-import os
-import json
-import requests
-import urllib3
 import streamlit as st
 import streamlit.components.v1 as components
+import requests
+import urllib3
+import json
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -48,25 +41,18 @@ st.markdown("""
 
 # ── 세션 초기화 ──────────────────────────────────────────
 for k, v in {
-    "map_lat":   37.5668,
-    "map_lng":   126.9786,
-    "addr":      None,
-    "pnu":       None,
-    "items":     None,
-    "err":       None,
-    "last_coord": None,
+    "map_lat":    37.5668,
+    "map_lng":    126.9786,
+    "addr":       None,
+    "pnu":        None,
+    "items":      None,
+    "err":        None,
+    "last_pnu":   None,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
-# ── 컴포넌트 고정 경로 선언 ──────────────────────────────
-# app.py 기준 상대 경로 → 매 rerun에도 동일 경로 → 번쩍거림 없음
-_COMP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kakao_component")
-_kakao_map = components.declare_component("kakao_map", path=_COMP_PATH)
-
-
-# ── API 함수 ─────────────────────────────────────────────
 def normalize_items(raw):
     if raw is None:           return []
     if isinstance(raw, dict): return [raw]
@@ -74,45 +60,57 @@ def normalize_items(raw):
     return []
 
 
-def get_building_data(lat: float, lng: float):
-    headers = {"Authorization": f"KakaoAK {ADDR_REST_KEY}"}
+def get_building_data(pnu: str):
+    """PNU로 건축물대장 조회 (Python만 가능 - CORS 차단)"""
+    sigungu = pnu[0:5]
+    bjdong  = pnu[5:10]
+    bun     = pnu[11:15]
+    ji      = pnu[15:19]
     try:
-        reg = requests.get(
-            f"https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x={lng}&y={lat}",
-            headers=headers, timeout=5).json()
-        b_code = next(
-            (d["code"] for d in reg.get("documents", []) if d.get("region_type") == "B"), None)
-
-        adr = requests.get(
-            f"https://dapi.kakao.com/v2/local/geo/coord2address.json?x={lng}&y={lat}",
-            headers=headers, timeout=5).json()
-
-        if not b_code:
-            return None, None, None, "법정동 코드 없음 (도로·하천 구역)"
-        if not adr.get("documents"):
-            return None, None, None, "주소 정보 없음"
-
-        a   = adr["documents"][0]["address"]
-        bun = a["main_address_no"]
-        ji  = a["sub_address_no"] or "0"
-        pnu = b_code + "1" + bun.zfill(4) + ji.zfill(4)
-
         res = requests.get(
             "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo",
-            params={"serviceKey": LEDGER_KEY, "sigunguCd": b_code[:5],
-                    "bjdongCd": b_code[5:10], "platGbCd": "0",
-                    "bun": bun.zfill(4), "ji": ji.zfill(4),
+            params={"serviceKey": LEDGER_KEY,
+                    "sigunguCd": sigungu, "bjdongCd": bjdong,
+                    "platGbCd": "0", "bun": bun, "ji": ji,
                     "pageNo": "1", "numOfRows": "30", "_type": "json"},
             verify=False, timeout=10).json()
-
         raw   = res.get("response", {}).get("body", {}).get("items", {})
         items = normalize_items(raw.get("item") if isinstance(raw, dict) else None)
-        return a["address_name"], pnu, items, None
-
+        return items, None
     except requests.exceptions.Timeout:
-        return None, None, None, "API 시간 초과"
+        return None, "건축물대장 API 시간 초과"
     except Exception as e:
-        return None, None, None, f"오류: {e}"
+        return None, f"건축물대장 오류: {e}"
+
+
+# ── query_params 수신 ────────────────────────────────────
+# JS의 <a target="_top"> 클릭 → Streamlit 페이지 URL 변경
+# → st.query_params에서 파라미터 감지 → rerun
+qp = st.query_params
+if "pnu" in qp:
+    pnu_in   = qp.get("pnu", "")
+    addr_in  = qp.get("addr", "")
+    try:
+        lat_in = float(qp.get("lat", st.session_state.map_lat))
+        lng_in = float(qp.get("lng", st.session_state.map_lng))
+    except (ValueError, TypeError):
+        lat_in = st.session_state.map_lat
+        lng_in = st.session_state.map_lng
+
+    if pnu_in and pnu_in != st.session_state.last_pnu:
+        with st.spinner("🔍 건축물대장 조회 중..."):
+            items, err = get_building_data(pnu_in)
+        st.session_state.update({
+            "last_pnu": pnu_in,
+            "map_lat":  lat_in,
+            "map_lng":  lng_in,
+            "addr":     addr_in,
+            "pnu":      pnu_in,
+            "items":    items,
+            "err":      err,
+        })
+    st.query_params.clear()
+    st.rerun()
 
 
 # ── 레이아웃 ─────────────────────────────────────────────
@@ -153,36 +151,172 @@ with col_info:
                             f"<span style='font-weight:600'>{val}</span></div>",
                             unsafe_allow_html=True)
 
-# ── 좌측 지도 컴포넌트 ───────────────────────────────────
+# ── 좌측 지도 ─────────────────────────────────────────────
 with col_map:
-    # Python → JS: 초기 데이터 전달 (render 이벤트)
-    coord = _kakao_map(
-        map_key    = MAP_JS_KEY,
-        vworld_key = VWORLD_KEY,
-        lat        = st.session_state.map_lat,
-        lng        = st.session_state.map_lng,
-        pnu        = st.session_state.pnu or "",
-        key        = "kakao_map",
-        default    = None,
-        height     = 700,
-    )
+    lat_c  = st.session_state.map_lat
+    lng_c  = st.session_state.map_lng
+    pnu_js = st.session_state.pnu or ""
 
-    # JS → Python: 클릭 좌표 수신
-    if coord and isinstance(coord, dict):
-        lat = coord.get("lat")
-        lng = coord.get("lng")
-        if lat and lng:
-            coord_key = f"{lat},{lng}"
-            if coord_key != st.session_state.last_coord:
-                with st.spinner("🔍 건축물대장 조회 중..."):
-                    addr, pnu, items, err = get_building_data(float(lat), float(lng))
-                st.session_state.update({
-                    "last_coord": coord_key,
-                    "map_lat":    float(lat),
-                    "map_lng":    float(lng),
-                    "addr":       addr,
-                    "pnu":        pnu,
-                    "items":      items,
-                    "err":        err,
-                })
-                st.rerun()
+    map_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+html, body {{ width: 100%; height: 100%; overflow: hidden; }}
+#map {{ width: 100%; height: 700px; }}
+
+/* 팝업 버튼 스타일 */
+.kbtn {{
+  display: inline-block;
+  background: #fff;
+  border: 2px solid #3396ff;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a3a6b;
+  font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+  box-shadow: 0 3px 12px rgba(0,0,0,.15);
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+  position: relative;
+}}
+.kbtn:hover {{ background: #e8f0ff; }}
+.kbtn::after {{
+  content: '';
+  position: absolute;
+  bottom: -9px; left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #3396ff;
+}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={MAP_JS_KEY}&libraries=services&autoload=false"></script>
+<script>
+var ADDR_KEY   = "{ADDR_REST_KEY}";
+var VWORLD_KEY = "{VWORLD_KEY}";
+var map, ov;
+
+kakao.maps.load(function() {{
+  map = new kakao.maps.Map(document.getElementById('map'), {{
+    center: new kakao.maps.LatLng({lat_c}, {lng_c}),
+    level: 3
+  }});
+
+  var pnu = "{pnu_js}";
+  if (pnu) drawParcel(pnu);
+
+  kakao.maps.event.addListener(map, 'click', function(e) {{
+    var lat = e.latLng.getLat();
+    var lng = e.latLng.getLng();
+    if (ov) ov.setMap(null);
+
+    // 클릭 위치에 로딩 표시 먼저
+    var loadDiv = document.createElement('div');
+    loadDiv.className = 'kbtn';
+    loadDiv.style.color = '#888';
+    loadDiv.textContent = '⏳ 주소 조회 중...';
+
+    ov = new kakao.maps.CustomOverlay({{
+      map: map,
+      position: e.latLng,
+      content: loadDiv,
+      yAnchor: 1.0
+    }});
+
+    // 카카오 REST로 PNU 계산 (CORS 허용)
+    getPNU(lat, lng, function(pnu, addr, err) {{
+      if (ov) ov.setMap(null);
+      if (err) {{
+        var errDiv = document.createElement('div');
+        errDiv.className = 'kbtn';
+        errDiv.style.color = '#e53e3e';
+        errDiv.textContent = '⚠️ ' + err;
+        ov = new kakao.maps.CustomOverlay({{
+          map: map, position: e.latLng,
+          content: errDiv, yAnchor: 1.0
+        }});
+        return;
+      }}
+
+      // ★ 핵심: <a target="_top"> 클릭으로 Streamlit URL 변경
+      // allow-top-navigation-by-user-activation → 사용자 클릭 시 허용
+      var url = '?pnu=' + encodeURIComponent(pnu)
+              + '&addr=' + encodeURIComponent(addr)
+              + '&lat=' + lat + '&lng=' + lng;
+
+      var link = document.createElement('a');
+      link.href = url;
+      link.target = '_top';          // 부모 페이지 URL 변경
+      link.className = 'kbtn';
+      link.textContent = '📋 건축물대장 조회';
+
+      ov = new kakao.maps.CustomOverlay({{
+        map: map,
+        position: e.latLng,
+        content: link,
+        yAnchor: 1.0
+      }});
+    }});
+  }});
+}});
+
+// 카카오 REST API로 좌표 → PNU 계산
+function getPNU(lat, lng, cb) {{
+  Promise.all([
+    fetch('https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x=' + lng + '&y=' + lat,
+      {{ headers: {{ 'Authorization': 'KakaoAK ' + ADDR_KEY }} }}).then(r => r.json()),
+    fetch('https://dapi.kakao.com/v2/local/geo/coord2address.json?x=' + lng + '&y=' + lat,
+      {{ headers: {{ 'Authorization': 'KakaoAK ' + ADDR_KEY }} }}).then(r => r.json())
+  ]).then(function(results) {{
+    var regRes = results[0];
+    var adrRes = results[1];
+
+    var bDoc = (regRes.documents || []).find(function(d) {{ return d.region_type === 'B'; }});
+    if (!bDoc) {{ cb(null, null, '법정동 코드 없음'); return; }}
+    if (!adrRes.documents || !adrRes.documents.length) {{ cb(null, null, '주소 없음'); return; }}
+
+    var a   = adrRes.documents[0].address;
+    var bun = a.main_address_no;
+    var ji  = a.sub_address_no || '0';
+    var pnu = bDoc.code + '1' + bun.padStart(4,'0') + ji.padStart(4,'0');
+    cb(pnu, a.address_name, null);
+
+  }}).catch(function(e) {{
+    cb(null, null, '주소 조회 실패: ' + e.message);
+  }});
+}}
+
+// Vworld 지적경계
+function drawParcel(pnu) {{
+  var s = document.createElement('script');
+  s.src = 'https://api.vworld.kr/req/data?service=data&request=GetFeature'
+    + '&data=LP_PA_CBND_BU_GEOM&key=' + VWORLD_KEY
+    + '&attrFilter=pnu:=' + pnu + '&crs=EPSG:4326&callback=vCb';
+  document.body.appendChild(s);
+}}
+window.vCb = function(d) {{
+  if (!d.response || d.response.status !== 'OK') return;
+  var f = d.response.result.featureCollection.features;
+  if (!f || !f.length) return;
+  var g = f[0].geometry.coordinates;
+  while (Array.isArray(g[0][0])) g = g[0];
+  var path = g.map(function(c) {{ return new kakao.maps.LatLng(c[1], c[0]); }});
+  new kakao.maps.Polygon({{
+    map: map, path: path,
+    strokeWeight: 3, strokeColor: '#3396ff', strokeOpacity: 1,
+    fillColor: '#3396ff', fillOpacity: 0.15
+  }});
+}};
+</script>
+</body>
+</html>"""
+
+    components.html(map_html, height=710, scrolling=False)
