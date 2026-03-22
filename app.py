@@ -119,9 +119,13 @@ lng_c     = st.session_state.map_lng
 
 # session_state의 건물 정보를 JS에 JSON으로 주입
 import json
-items_js  = st.session_state.items or []
-err_js    = st.session_state.err   or ""
-items_json = json.dumps(items_js, ensure_ascii=False)
+_raw       = st.session_state.items
+items_js   = _raw if isinstance(_raw, list) else []
+err_js     = str(st.session_state.err) if st.session_state.err else ""
+try:
+    items_json = json.dumps(items_js, ensure_ascii=False)
+except (TypeError, ValueError):
+    items_json = "[]"
 
 map_html = f"""<!DOCTYPE html>
 <html>
