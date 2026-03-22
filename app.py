@@ -163,6 +163,8 @@ with col_map:
 <html>
 <head>
 <meta charset="utf-8">
+<!-- 카카오맵 SDK가 내부적으로 http:// 리소스를 불러옴 → HTTPS로 강제 업그레이드 -->
+<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
 <style>
 html,body{{margin:0;padding:0;}}
 #map{{width:100%;height:680px;}}
