@@ -13,7 +13,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 MAP_JS_KEY    = "ede7b455451821c17720156a3e8b5011"
-ADDR_REST_KEY = "c5af33c0d1d6a654362d3fea152cc076"
+ADDR_REST_KEY = "668fc8777ccf99d71bfe4be308a90047"
 LEDGER_KEY    = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 VWORLD_KEY    = "D2A7A3D2-EBE4-339F-A5A7-3C32E6751F98"
 
